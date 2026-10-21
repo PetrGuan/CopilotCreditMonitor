@@ -25,6 +25,8 @@ struct MonitorSnapshot {
     let budgetCents: Int64
     let usedLowerNano: Int64
     let hasIncompleteData: Bool
+    var hasManualUsage = false
+    var canAddManualUsage = false
 }
 
 final class MonitorController: @unchecked Sendable {
@@ -34,9 +36,12 @@ final class MonitorController: @unchecked Sendable {
     private let scanner: SessionScanner
     private let ledgerStore: LedgerStore
     private let settingsStore: BudgetSettingsStore
+    private let manualUsageStore: ManualUsageStore
     private var ledger: Ledger = Ledger()
     private var settings = BudgetSettings()
+    private var manualUsage = ManualUsage()
     private var watcher: SessionWatcher?
+    private var resetTimer: DispatchSourceTimer?
 
     private var isScanRunning = false
     private var scanRequested = false
@@ -75,6 +80,7 @@ final class MonitorController: @unchecked Sendable {
         scanner = SessionScanner(sourceRoots: configuration.sourceRoots)
         ledgerStore = LedgerStore(dataDirectory: configuration.dataDirectory)
         settingsStore = BudgetSettingsStore(dataDirectory: configuration.dataDirectory)
+        manualUsageStore = ManualUsageStore(dataDirectory: configuration.dataDirectory)
         self.onSnapshot = onSnapshot
     }
 
@@ -85,6 +91,7 @@ final class MonitorController: @unchecked Sendable {
                 try self.ledgerStore.ensureDataDirectory()
                 self.ledger = try self.ledgerStore.load()
                 self.settings = try self.settingsStore.loadOrDefault()
+                self.manualUsage = try self.manualUsageStore.load()
             } catch {
                 self.blockedError = error.localizedDescription
                 self.publishError(message: "配置或账本损坏：\(error.localizedDescription)")
@@ -108,6 +115,8 @@ final class MonitorController: @unchecked Sendable {
             self.activeCancellation = nil
             self.watcher?.stop()
             self.watcher = nil
+            self.resetTimer?.cancel()
+            self.resetTimer = nil
         }
     }
 
@@ -157,6 +166,55 @@ final class MonitorController: @unchecked Sendable {
         return MoneyFormatter.exactUSD(fromNano: remaining)
     }
 
+    func manualUsagePreview(input: String) -> String? {
+        let snapshot = readLatestSnapshot()
+        guard snapshot.canAddManualUsage else { return nil }
+        switch snapshot.status {
+        case .ready, .partial, .unavailable:
+            break
+        default:
+            return nil
+        }
+        guard let cents = try? ManualUsageStore.parseAmountCents(input: input),
+              let addedNano = try? BudgetMath.budgetNano(fromCents: cents),
+              let usedNano = try? BudgetMath.addExact(snapshot.usedLowerNano, addedNano),
+              let budgetNano = try? BudgetMath.budgetNano(fromCents: snapshot.budgetCents),
+              let remaining = try? BudgetMath.subtractExact(budgetNano, usedNano) else { return nil }
+        if case .unavailable = snapshot.status {
+            return "≤ \(MoneyFormatter.upperBoundUSD(fromNano: remaining))"
+        }
+        return snapshot.hasIncompleteData
+            ? "≤ \(MoneyFormatter.upperBoundUSD(fromNano: remaining))"
+            : MoneyFormatter.exactUSD(fromNano: remaining)
+    }
+
+    func addManualUsage(input: String, completion: @escaping @Sendable (Result<Void, Error>) -> Void) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            do {
+                guard !self.isStopped, self.blockedError == nil, self.hasTrustedSnapshot else {
+                    throw NSError(domain: "MonitorController", code: 4, userInfo: [
+                        NSLocalizedDescriptionKey: self.blockedError ?? "请等待首次用量读取完成后再扣除。",
+                    ])
+                }
+                let now = Date()
+                let next = try self.manualUsage.adding(input: input, now: now)
+                _ = try BudgetMath.summarize(
+                    entries: Array(self.ledger.entries.values),
+                    budgetCents: self.settings.weeklyBudgetCents,
+                    now: now,
+                    manualUsage: next
+                )
+                try self.manualUsageStore.save(next)
+                self.manualUsage = next
+                self.publishSummary(trigger: "manual-usage-saved", warnings: [], preserveProcessingState: true)
+                DispatchQueue.main.async { completion(.success(())) }
+            } catch {
+                DispatchQueue.main.async { completion(.failure(error)) }
+            }
+        }
+    }
+
     func refreshNow() {
         queue.async { [weak self] in
             self?.requestScan(trigger: "manual")
@@ -191,6 +249,7 @@ final class MonitorController: @unchecked Sendable {
 
     private func requestScan(trigger: String) {
         guard !isStopped, blockedError == nil else { return }
+        scheduleWeeklyReset()
         if isScanRunning {
             scanRequested = true
             return
@@ -225,6 +284,23 @@ final class MonitorController: @unchecked Sendable {
                 self?.completeScan(result: result, token: token, trigger: trigger)
             }
         }
+    }
+
+    private func scheduleWeeklyReset() {
+        resetTimer?.cancel()
+        let now = Date()
+        let nextReset = BudgetMath.weekWindow(containing: now).end
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(wallDeadline: .now() + max(0.1, nextReset.timeIntervalSince(now)))
+        timer.setEventHandler { [weak self] in
+            guard let self, !self.isStopped else { return }
+            if self.hasTrustedSnapshot {
+                self.publishSummary(trigger: "weekly-reset", warnings: [], preserveProcessingState: true)
+            }
+            self.requestScan(trigger: "weekly-reset")
+        }
+        resetTimer = timer
+        timer.resume()
     }
 
     private func finishScanAndQueueNext(trigger: String) {
@@ -329,11 +405,13 @@ final class MonitorController: @unchecked Sendable {
 
     private func publishSummary(trigger: String, warnings: [ScanWarning], preserveProcessingState: Bool = false) {
         let now = Date()
+        let previous = readLatestSnapshot()
         do {
             let summary = try BudgetMath.summarize(
                 entries: Array(ledger.entries.values),
                 budgetCents: settings.weeklyBudgetCents,
-                now: now
+                now: now,
+                manualUsage: manualUsage
             )
             let budgetText = MoneyFormatter.exactUSD(fromNano: summary.budgetNano)
             let nextReset = DateFormatter.humanReset.string(from: summary.nextReset)
@@ -346,7 +424,7 @@ final class MonitorController: @unchecked Sendable {
             let progressValue: Double?
             var statusLabel: String
 
-            if summary.eventCount == 0 {
+            if summary.eventCount == 0 && summary.manualUsedNano == 0 {
                 status = .unavailable
                 remainingText = "—"
                 usedText = "—"
@@ -372,14 +450,23 @@ final class MonitorController: @unchecked Sendable {
             if preserveProcessingState, isScanRunning {
                 if hasTrustedSnapshot {
                     status = .stale("正在扫描，显示上次读数")
-                    statusLabel = "预算已保存，等待扫描完成"
+                    statusLabel = "更改已保存，等待扫描完成"
                 } else {
                     status = .bootstrapping
-                    statusLabel = "预算已保存，等待首次导入完成"
+                    statusLabel = "更改已保存，等待首次导入完成"
+                }
+            }
+            if preserveProcessingState {
+                switch previous.status {
+                case .error, .stale:
+                    status = previous.status
+                default:
+                    break
                 }
             }
 
             let warning = warnings.first?.message ?? watcherFailureMessage
+                ?? (preserveProcessingState ? previous.warningText : nil)
             let snapshot = MonitorSnapshot(
                 status: status,
                 remainingText: remainingText,
@@ -450,15 +537,19 @@ final class MonitorController: @unchecked Sendable {
         return latestSnapshot
     }
 
-    private func push(_ snapshot: MonitorSnapshot) {
+    private func push(_ candidate: MonitorSnapshot) {
         guard !isStopped else { return }
+        var snapshot = candidate
+        snapshot.hasManualUsage = manualUsage.currentAmountCents(at: Date()) > 0
+        snapshot.canAddManualUsage = hasTrustedSnapshot && blockedError == nil
         snapshotLock.lock()
         latestSnapshot = snapshot
         snapshotLock.unlock()
         let callback = onSnapshot
+        let published = snapshot
         Task { @MainActor [weak self] in
             guard let self, !self.isLifecycleStopped() else { return }
-            callback(snapshot)
+            callback(published)
         }
     }
 

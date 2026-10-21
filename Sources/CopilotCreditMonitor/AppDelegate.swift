@@ -57,6 +57,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             controller.saveBudget(input: input, completion: completion)
         }
+        popoverController.onPreviewManualUsage = { [weak controller] input in
+            controller?.manualUsagePreview(input: input)
+        }
+        popoverController.onSaveManualUsage = { [weak controller] input, completion in
+            guard let controller else {
+                completion(.failure(NSError(domain: "AppDelegate", code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "用量控制器不可用。"])))
+                return
+            }
+            controller.addManualUsage(input: input, completion: completion)
+        }
         registerTimeObservers()
         controller.start()
     }

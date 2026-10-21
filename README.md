@@ -21,11 +21,12 @@ A small, native macOS menu bar app. See what's left, adjust your budget, and get
   </tr>
 </table>
 
-<p align="center"><sub>Actual app screenshots, captured with synthetic data against a neutral backdrop. The current interface is in Simplified Chinese.</sub></p>
+<p align="center"><sub>Actual app screenshots, captured with synthetic data against a neutral backdrop, before the manual deduction button was added. The current interface is in Simplified Chinese.</sub></p>
 
 > **A local budget monitor, not a GitHub account balance.**
-> Amounts come from compatible Copilot CLI / SDK logs on your Mac. They do not include
-> other devices, GitHub web usage, or native IDE Chat.
+> Automatic amounts come from compatible Copilot CLI / SDK logs on your Mac.
+> Other devices, GitHub web usage, and native IDE Chat are not automatically included;
+> you can manually deduct spending from elsewhere.
 
 ## A little utility, not another dashboard
 
@@ -35,6 +36,8 @@ A small, native macOS menu bar app. See what's left, adjust your budget, and get
   light/dark appearance support, and restrained spring interactions that respect Reduce Motion.
 - **Your weekly budget.** Start at **$1,000/week** or choose another amount.
   Preview the result before saving; changes apply immediately without clearing spending.
+- **Simple manual deductions.** Enter dollars spent elsewhere and deduct them from
+  this week's balance. No history screen or record management.
 - **Updates as you work.** File watching, bounded parallel scanning, saved read positions,
   and manual refresh—without a once-per-second polling loop.
 - **Honest about missing data.** Incomplete usage is shown as a bound, not an exact balance.
@@ -72,6 +75,23 @@ For example, if you've used **$257.20**, changing the weekly budget from **$1,00
 to **$500** immediately changes the remaining amount to **$242.80**.
 Nothing is removed from the usage history.
 
+### Deduct spending from another computer
+
+Click **扣除** (Deduct), enter a positive USD amount, and choose **确认扣除**
+(Confirm deduction). The preview shows your remaining balance after the deduction.
+For example, deducting **$50** from **$742.80** leaves **$692.80**.
+
+Each confirmation adds to this week's manual total. It also increases the displayed
+used amount, without changing the weekly budget or the automatic usage ledger.
+Only the weekly total is stored—not a list of individual deductions.
+It survives restarts and stops counting at the next Monday 01:00 UTC+8 reset.
+There is no history, editing, or undo UI; check the amount before confirming.
+Only enter spending not already counted on this Mac to avoid double-counting.
+
+Manual deductions become available after the first successful log scan. If local
+usage is absent or incomplete, the balance remains an upper bound rather than
+claiming that manual input has made the automatic data complete.
+
 ## What the numbers mean
 
 | Rule | Behavior |
@@ -83,6 +103,7 @@ Nothing is removed from the usage history.
 | Over budget | Remaining dollars can be negative |
 | Partial or unavailable usage | Known spending is a lower bound; remaining budget is an upper bound (`≤`) |
 | BYOK requests | Excluded from the Copilot-credit budget |
+| Manual deductions | Positive USD amounts, up to two decimal places; accumulate only within the current week |
 
 The budget and conversion are **project rules**, not a promise of GitHub entitlements,
 official pricing, or an invoice. The app reads reported credit amounts—it does not
@@ -100,9 +121,10 @@ Its own state is stored in:
 
 ```text
 ~/Library/Application Support/CopilotCreditMonitor/
-├── ledger-v1.json      # Usage entries, source paths, read positions, parser revision
-├── settings-v1.json    # Weekly budget in cents
-└── monitor.lock        # Prevents concurrent writers to the same data directory
+├── ledger-v1.json        # Usage entries, source paths, read positions, parser revision
+├── settings-v1.json      # Weekly budget in cents
+├── manual-usage-v1.json  # Week boundary and cumulative manual deduction in cents
+└── monitor.lock          # Prevents concurrent writers to the same data directory
 ```
 
 Reading a mixed session log necessarily reads bytes that may contain conversations.
@@ -124,7 +146,7 @@ directory when switching profiles so their histories remain isolated:
 ```
 
 `--session-dir` replaces the default source. `--data-dir` isolates the ledger,
-budget settings, and instance lock together.
+budget settings, manual deductions, and instance lock together.
 
 <details>
 <summary><strong>How scanning works—and why the first import takes longer</strong></summary>
@@ -175,4 +197,4 @@ Tests are run manually. No UI-test target or GitHub Actions workflow is included
 
 Earlier [appearance studies](docs/design/frost-appearances.png) and
 [budget-flow mockups](docs/design/frost-budget-settings.png) remain as design references;
-the screenshots at the top show the current implementation.
+the screenshots at the top show the native UI before the manual deduction button was added.

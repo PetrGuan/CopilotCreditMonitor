@@ -25,9 +25,10 @@ public struct BudgetSummary: Sendable, Codable {
     public let unavailableCount: Int
     public let eventCount: Int
     public let supportedEventCount: Int
+    public let manualUsedNano: Int64
 
     public var hasIncompleteData: Bool {
-        partialCount > 0 || unavailableCount > 0
+        partialCount > 0 || unavailableCount > 0 || (eventCount == 0 && manualUsedNano > 0)
     }
 }
 
@@ -67,7 +68,8 @@ public enum BudgetMath {
     public static func summarize(
         entries: some Collection<UsageEntry>,
         budgetCents: Int64,
-        now: Date
+        now: Date,
+        manualUsage: ManualUsage = ManualUsage()
     ) throws -> BudgetSummary {
         let (weekStart, nextReset) = weekWindow(containing: now)
         let budgetNano = try budgetNano(fromCents: budgetCents)
@@ -95,6 +97,9 @@ public enum BudgetMath {
             }
         }
 
+        try manualUsage.validate()
+        let manualUsedNano = try Self.budgetNano(fromCents: manualUsage.currentAmountCents(at: now))
+        usedLowerNano = try addExact(usedLowerNano, manualUsedNano)
         let remainingUpperNano = try subtractExact(budgetNano, usedLowerNano)
         return BudgetSummary(
             weekStart: weekStart,
@@ -106,7 +111,8 @@ public enum BudgetMath {
             partialCount: partialCount,
             unavailableCount: unavailableCount,
             eventCount: eventCount,
-            supportedEventCount: supportedEventCount
+            supportedEventCount: supportedEventCount,
+            manualUsedNano: manualUsedNano
         )
     }
 

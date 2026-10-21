@@ -10,9 +10,11 @@ final class PopoverViewController: NSViewController, NSTextFieldDelegate {
     var onQuit: (() -> Void)?
     var onSaveBudget: ((String, @escaping @Sendable (Result<Void, Error>) -> Void) -> Void)?
     var onPreviewBudget: ((String) -> String?)?
+    var onSaveManualUsage: ((String, @escaping @Sendable (Result<Void, Error>) -> Void) -> Void)?
+    var onPreviewManualUsage: ((String) -> String?)?
     var onContentSizeChange: ((NSSize) -> Void)?
 
-    private enum Mode { case summary, settings }
+    private enum Mode { case summary, settings, manual }
     private var mode: Mode = .summary
     private var currentSnapshot: MonitorSnapshot?
     private var isSaving = false
@@ -31,6 +33,7 @@ final class PopoverViewController: NSViewController, NSTextFieldDelegate {
     private let warningLabel = label("", size: 11)
     private let refreshButton = FrostButton(title: "刷新", symbol: "arrow.clockwise")
     private let settingsButton = FrostButton(title: "", symbol: "slider.horizontal.3")
+    private let manualButton = FrostButton(title: "扣除", symbol: "minus.circle")
     private let quitButton = FrostButton(title: "", symbol: "power")
 
     private let inputCard = FrostCardView()
@@ -40,6 +43,12 @@ final class PopoverViewController: NSViewController, NSTextFieldDelegate {
     private let backButton = FrostButton(title: "", symbol: "chevron.left")
     private let cancelButton = FrostButton(title: "取消")
     private let saveButton = FrostButton(title: "保存额度", style: .primary)
+    private let editorTitle = label("每周额度", size: 13, weight: .semibold)
+    private let inputTitle = label("每周预算", size: 11, secondary: true)
+    private let inputHint = label("默认 $1,000.00 / 周", size: 10, secondary: true)
+    private let previewTitle = label("保存后，本周剩余", size: 10, secondary: true)
+    private let previewHint = label("已用金额保持不变", size: 10, secondary: true)
+    private let editorNote = label("额度立即生效，并沿用至后续每周。", size: 10, secondary: true)
 
     override func loadView() {
         view = FrostMaterialView(frame: NSRect(x: 0, y: 0, width: Self.panelWidth, height: 360))
@@ -128,10 +137,13 @@ final class PopoverViewController: NSViewController, NSTextFieldDelegate {
         warningLabel.isHidden = true
         summaryStack.addArrangedSubview(warningLabel)
 
-        let footer = row([refreshButton, NSView(), settingsButton, quitButton], spacing: 7)
+        let footer = row([refreshButton, NSView(), manualButton, settingsButton, quitButton], spacing: 7)
         refreshButton.widthAnchor.constraint(equalToConstant: 65).isActive = true
         connect(refreshButton, action: #selector(refresh), help: "刷新用量")
         connect(settingsButton, action: #selector(openSettings), help: "额度设置")
+        connect(manualButton, action: #selector(openManualUsage), help: "手动扣除其他电脑已用的美元金额")
+        manualButton.widthAnchor.constraint(equalToConstant: 65).isActive = true
+        manualButton.isEnabled = false
         connect(quitButton, action: #selector(quit), help: "退出 Copilot Credit Monitor")
         let divider = separator()
         summaryStack.addArrangedSubview(divider)
@@ -142,8 +154,7 @@ final class PopoverViewController: NSViewController, NSTextFieldDelegate {
 
     private func buildSettings() {
         configurePage(settingsStack, spacing: 20)
-        let title = Self.label("每周额度", size: 13, weight: .semibold)
-        let header = row([backButton, title, NSView()], spacing: 7)
+        let header = row([backButton, editorTitle, NSView()], spacing: 7)
         connect(backButton, action: #selector(cancelSettings), help: "返回余额")
         settingsStack.addArrangedSubview(header)
 
@@ -164,23 +175,22 @@ final class PopoverViewController: NSViewController, NSTextFieldDelegate {
         let inputRow = row([currency, settingsInput], spacing: 15)
         pin(inputRow, inside: inputCard, inset: 16)
         let form = column([
-            Self.label("每周预算", size: 11, secondary: true),
+            inputTitle,
             inputCard,
-            Self.label("默认 $1,000.00 / 周", size: 10, secondary: true),
+            inputHint,
         ], spacing: 10)
         settingsStack.addArrangedSubview(form)
 
         let previewCard = FrostCardView()
         previewValue.textColor = FrostPalette.accent
         let previewContent = column([
-            Self.label("保存后，本周剩余", size: 10, secondary: true),
+            previewTitle,
             previewValue,
-            Self.label("已用金额保持不变", size: 10, secondary: true),
+            previewHint,
         ], spacing: 7)
         pin(previewContent, inside: previewCard, inset: 16)
         settingsStack.addArrangedSubview(previewCard)
-        let note = Self.label("额度立即生效，并沿用至后续每周。", size: 10, secondary: true)
-        settingsStack.addArrangedSubview(note)
+        settingsStack.addArrangedSubview(editorNote)
         settingsError.textColor = .systemOrange
         settingsError.maximumNumberOfLines = 2
         settingsError.lineBreakMode = .byWordWrapping
@@ -207,6 +217,7 @@ final class PopoverViewController: NSViewController, NSTextFieldDelegate {
         usedValue.stringValue = snapshot.usedText
         percentageValue.stringValue = snapshot.progressText
         progress.setValue(snapshot.progressValue, description: snapshot.progressText)
+        manualButton.isEnabled = !isSaving && snapshot.canAddManualUsage
         importLabel.isHidden = true
         warningLabel.isHidden = snapshot.warningText == nil
         warningLabel.stringValue = snapshot.warningText == nil ? "" : "暂时无法更新，刷新后重试"
@@ -215,7 +226,7 @@ final class PopoverViewController: NSViewController, NSTextFieldDelegate {
         statusLabel.textColor = .secondaryLabelColor
         switch snapshot.status {
         case .ready:
-            statusLabel.stringValue = "本机"
+            statusLabel.stringValue = snapshot.hasManualUsage ? "含手动扣除" : "本机"
             statusLabel.textColor = FrostPalette.accent
         case .partial:
             statusLabel.stringValue = "待补齐"
@@ -232,7 +243,7 @@ final class PopoverViewController: NSViewController, NSTextFieldDelegate {
             importLabel.isHidden = false
             importLabel.stringValue = importProgress(snapshot.statusText)
         }
-        if mode == .settings { updatePreview() }
+        if mode == .settings || mode == .manual { updatePreview() }
         updateContentSize()
     }
 
@@ -268,7 +279,8 @@ final class PopoverViewController: NSViewController, NSTextFieldDelegate {
     private func show(_ newMode: Mode, animated: Bool = true) {
         mode = newMode
         summaryStack.isHidden = newMode != .summary
-        settingsStack.isHidden = newMode != .settings
+        settingsStack.isHidden = newMode != .settings && newMode != .manual
+        saveButton.keyEquivalent = (newMode == .settings || newMode == .manual) ? "\r" : ""
         updateContentSize()
         if animated {
             let incoming = newMode == .summary ? summaryStack : settingsStack
@@ -297,9 +309,15 @@ final class PopoverViewController: NSViewController, NSTextFieldDelegate {
 
     private func updatePreview() {
         let input = settingsInput.stringValue
-        let parsed = try? BudgetSettingsStore.parseBudgetCents(input: input)
-        saveButton.isEnabled = !isSaving && parsed != nil && parsed != currentSnapshot?.budgetCents
-        previewValue.stringValue = onPreviewBudget?(input) ?? "—"
+        if mode == .manual {
+            let parsed = try? ManualUsageStore.parseAmountCents(input: input)
+            saveButton.isEnabled = !isSaving && parsed != nil && currentSnapshot?.canAddManualUsage == true
+            previewValue.stringValue = onPreviewManualUsage?(input) ?? "—"
+        } else {
+            let parsed = try? BudgetSettingsStore.parseBudgetCents(input: input)
+            saveButton.isEnabled = !isSaving && parsed != nil && parsed != currentSnapshot?.budgetCents
+            previewValue.stringValue = onPreviewBudget?(input) ?? "—"
+        }
         previewValue.font = .monospacedDigitSystemFont(
             ofSize: previewValue.stringValue.count > 16 ? 17 : 23, weight: .medium
         )
@@ -317,9 +335,14 @@ final class PopoverViewController: NSViewController, NSTextFieldDelegate {
         settingsError.isHidden = true
         if !settingsInput.stringValue.isEmpty {
             do {
-                _ = try BudgetSettingsStore.parseBudgetCents(input: settingsInput.stringValue)
+                if mode == .manual {
+                    _ = try ManualUsageStore.parseAmountCents(input: settingsInput.stringValue)
+                } else {
+                    _ = try BudgetSettingsStore.parseBudgetCents(input: settingsInput.stringValue)
+                }
             } catch {
-                settingsError.stringValue = "请输入非负金额，最多两位小数"
+                settingsError.stringValue = mode == .manual
+                    ? "请输入大于零的金额，最多两位小数" : "请输入非负金额，最多两位小数"
                 settingsError.toolTip = error.localizedDescription
                 settingsError.isHidden = false
             }
@@ -336,9 +359,40 @@ final class PopoverViewController: NSViewController, NSTextFieldDelegate {
         editGeneration += 1
         let cents = currentSnapshot?.budgetCents ?? BudgetMath.defaultWeeklyBudgetCents
         settingsInput.stringValue = "\(cents / 100)." + String(format: "%02lld", cents % 100)
+        configureEditor(manual: false)
         settingsError.isHidden = true
         show(.settings)
         updatePreview()
+        focusInput()
+    }
+
+    @objc private func openManualUsage() {
+        guard !isSaving, currentSnapshot?.canAddManualUsage == true else { return }
+        editGeneration += 1
+        settingsInput.stringValue = ""
+        configureEditor(manual: true)
+        settingsError.isHidden = true
+        show(.manual)
+        updatePreview()
+        focusInput()
+    }
+
+    private func configureEditor(manual: Bool) {
+        editorTitle.stringValue = manual ? "手动扣除" : "每周额度"
+        inputTitle.stringValue = manual ? "其他电脑已用金额" : "每周预算"
+        inputHint.stringValue = manual ? "只填写尚未计入的金额，避免重复扣除" : "默认 $1,000.00 / 周"
+        previewTitle.stringValue = manual ? "扣除后，本周剩余" : "保存后，本周剩余"
+        previewHint.stringValue = manual ? "计入本周已用，不改变每周额度" : "已用金额保持不变"
+        editorNote.stringValue = manual ? "仅计入当前周，下周不会重复扣除。" : "额度立即生效，并沿用至后续每周。"
+        saveButton.title = manual ? "确认扣除" : "保存额度"
+        saveButton.setAccessibilityLabel(manual ? "确认扣除美元金额" : "保存每周额度")
+        saveButton.toolTip = manual ? "确认扣除美元金额" : "保存每周额度"
+        settingsInput.placeholderString = manual ? "0.00" : "1000.00"
+        settingsInput.setAccessibilityLabel(manual ? "扣除金额，美元" : "每周预算，美元")
+        settingsInput.setAccessibilityHelp(manual ? "输入大于零的金额，最多两位小数" : "输入非负金额，最多两位小数")
+    }
+
+    private func focusInput() {
         view.window?.makeFirstResponder(settingsInput)
         inputCard.isFocused = true
         settingsInput.currentEditor()?.selectedRange = NSRange(
@@ -356,7 +410,8 @@ final class PopoverViewController: NSViewController, NSTextFieldDelegate {
 
     @objc private func saveSettings() {
         guard !isSaving, saveButton.isEnabled else { return }
-        guard let onSaveBudget else {
+        let save = mode == .manual ? onSaveManualUsage : onSaveBudget
+        guard let save else {
             settingsError.stringValue = "设置服务不可用，请重新打开应用"
             settingsError.isHidden = false
             updateContentSize()
@@ -368,19 +423,20 @@ final class PopoverViewController: NSViewController, NSTextFieldDelegate {
         backButton.isEnabled = false
         cancelButton.isEnabled = false
         saveButton.isEnabled = false
-        onSaveBudget(settingsInput.stringValue) { [weak self] result in
+        save(settingsInput.stringValue) { [weak self] result in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.isSaving = false
                 self.settingsInput.isEnabled = true
                 self.backButton.isEnabled = true
                 self.cancelButton.isEnabled = true
+                self.manualButton.isEnabled = self.currentSnapshot?.canAddManualUsage == true
                 guard self.editGeneration == generation else { return }
                 switch result {
                 case .success:
                     self.show(.summary)
                 case .failure(let error):
-                    self.settingsError.stringValue = "保存失败，请重试"
+                    self.settingsError.stringValue = "保存失败：\(error.localizedDescription)"
                     self.settingsError.toolTip = error.localizedDescription
                     self.settingsError.setAccessibilityHelp(error.localizedDescription)
                     self.settingsError.isHidden = false
