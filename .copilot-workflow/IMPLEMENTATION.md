@@ -164,3 +164,14 @@ Not executed by design:
 - Inspected captures of the actual running summary and settings popovers; captures
   containing local account amounts are kept outside the repository.
 - No accounting/scanning logic changed, and no test suite was run.
+
+## README and screenshots follow-up
+
+- Reworked the README as a user-facing project overview with inline screenshots,
+  source-build instructions, usage guidance, budget/coverage rules, and privacy notes.
+- Captured the current native UI in an isolated instance using synthetic spending
+  and a neutral backdrop. The settings image previews a changed budget without
+  touching the normal app's settings or ledger.
+- Added `docs/screenshots/balance.png` and `docs/screenshots/budget-settings.png`.
+  Public images contain no real account amounts, session data, or private desktop text.
+- Kept early mockups linked as design references, clearly distinct from current screenshots.
